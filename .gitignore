@@ -1,0 +1,9 @@
+.env
+*.session
+*.session-journal
+seen_vacancies.json
+.venv/
+.venv-1/
+.venv-2/
+__pycache__/
+*.pyc
