@@ -1,0 +1,236 @@
+import json
+import re
+
+from config import ai, CATEGORIES
+from utils import (
+    strip_json_block, strip_foreign_chars, has_glitch,
+    extract_contact,
+)
+
+
+def parse_vacancy(text: str) -> dict:
+    clean_text = text.replace('"', "'").replace('\\', '')
+
+    response = ai.chat.completions.create(
+        model="gpt-4o-mini",
+        max_tokens=1600,
+        messages=[{
+            "role": "user",
+            "content": f"""Ты парсер вакансий из Telegram-групп Кыргызстана. Объявления пишут обычные люди, без единого формата, часто на смеси русского и кыргызского, с ошибками и КАПСом.
+
+Извлеки ВСЮ полезную информацию и верни ОДИН JSON-объект. Только JSON, без markdown.
+
+ГЛАВНОЕ ПРАВИЛО: ничего важного не должно потеряться. Каждая деталь из текста (график, оплата, возраст, питание, развоз, особые условия) обязана попасть в нужное поле. НО ничего не выдумывай — бери только то что реально написано.
+
+САМОЕ ПЕРВОЕ — определи поле is_real_job (true/false):
+- true — это РЕАЛЬНОЕ предложение работы от работодателя И ПОНЯТНО, чем человек будет заниматься (есть конкретная должность или вид деятельности: продавец, повар, водитель, грузчик, мойщик, швея, ремонт, стройка, охранник, кассир и т.п.).
+- false — если выполняется ХОТЯ БЫ ОДНО:
+  • непонятно, какую именно работу предлагают (просто "требуются девушки", "нужны парни", "хорошая работа", "лёгкая работа" БЕЗ конкретной должности/деятельности);
+  • это вообще НЕ работа: реклама или набор людей в группу/канал ("адам кошунуз", "подпишитесь"); человек САМ ищет работу ("жумуш барбы", "иштейм", "иштейбиз", "иш болсо жазгыла"); попутка/поездка ("беру посылки", "места 2"); сдача жилья или поиск соседа по комнате ("комнаттада жашайбыз"); продажа товара; частные услуги;
+  • человек или бригада ПРЕДЛАГАЮТ СВОИ УСЛУГИ/ТРУД ("иштейбиз", "жардам иштейбиз", "иш болсо жазгыла", "беремся за любую работу") — это НЕ работодатель нанимает, а исполнитель ищет заказ;
+  • онлайн-подработка без конкретной должности: "отвечать на сообщения", "переписка с клиентами", "готовые тексты", "заработок из дома".
+Если is_real_job=false — остальные поля можешь оставить пустыми/по умолчанию, они не нужны.
+
+ЯЗЫК ВЫВОДА — СТРОГО:
+- Существуют только ДВА языка: русский и кыргызский. Других нет.
+- Если объявление на русском → весь вывод на русском. Если на кыргызском → на кыргызском. Если смесь → выбери преобладающий из этих двух.
+- Пиши ТОЛЬКО кириллицей. ЗАПРЕЩЕНО использовать греческие буквы, латиницу (кроме названий компаний и ссылок), азербайджанские/турецкие буквы (ə, ı, ş), арабицу, иероглифы и любые иные алфавиты.
+- Если слово непонятное или с опечаткой — приведи его к нормальному русскому или кыргызскому слову по смыслу. Пример: "утукко балдар керек" = в швейный цех нужны люди на глажку → position "Гладильщик". НЕ выдумывай и НЕ вставляй случайные символы/слова на других языках.
+- Если не можешь понять должность — поставь нейтральное "Сотрудник", но НИКОГДА не мешай чужие алфавиты.
+
+{{
+  "is_real_job": true,
+  "position": "название должности",
+  "category": "категория из списка",
+  "company": "название компании или Частный работодатель",
+  "work_schedule": "график или пусто",
+  "requirements": "требования к кандидату или пусто",
+  "conditions": "что предлагает работодатель или пусто",
+  "description": "суть работы и всё что не вошло в другие поля, или пусто",
+  "experience_work": "опыт коротко или пусто",
+  "remote_work": false,
+  "city": "город",
+  "work_address": "адрес или пусто",
+  "region": "регион или пусто",
+  "payment_period": "В час / В день / В неделю / В месяц или пусто",
+  "salary_net": 0,
+  "company_description": "ссылка-контакт"
+}}
+
+Категории (выбери ОДНУ по смыслу должности):
+it, trade(продавец/кассир магазин), sales(продажи/торг.представитель), construction(стройка/бетонщик/разнорабочий), transport(водитель/курьер), food(повар/официант/бармен/пекарь/посудомойщица/шаурмист), education, beauty, services, manufacturing(цех/сборка/производство/швейный цех/гладильщик/закройщик), security(охранник), medicine, finance, legal, marketing(промоутер/SMM), admin, agriculture, hospitality, domestic(няня/помощь по дому), management, customer_support, warehouse(грузчик/склад/сортировка), cleaning(уборщик/техничка), other
+
+ПРАВИЛА ПО ПОЛЯМ:
+
+position:
+- Ясно и коротко. "Требуется сотрудник на продуктовый магазин на длительное время" → "Сотрудник продуктового магазина"
+- ВЫВОДИ ДОЛЖНОСТЬ ИЗ КОНТЕКСТА даже если написано на кыргызском или косвенно: "малина отогонго адам керек" = сбор малины → "Сборщик малины"; "картошка казганга" → "Сборщик картофеля"; "тамак жасоого" → "Повар"; "бала карагандай" → "Няня". Если вид деятельности понятен — пиши конкретно, не "Сотрудник".
+- Объединяй род: "официант и официантки" → "Официант/официантка"; "кыз жигиттер" → оставь нейтрально
+- КАПС → нормальный регистр: "ПРОДАВЕЦ" → "Продавец"
+- Деликатное в requirements, не в position: "продавец женского белья" → position "Продавец-консультант", деталь в requirements
+- Несколько РАЗНЫХ должностей в одном тексте → через слеш: "Охранник / Кассир / Грузчик"
+- С большой буквы
+
+company: название из текста без кавычек (Кафе Людмила, Skyberry, Нуртелеком). Нет названия → "Частный работодатель"
+
+work_schedule: только режим/время. Форматы: "6/1", "2/2", "с 8:00 до 20:00". Две смены "21:00 08:00" → "с 21:00 до 08:00". Несколько смен на выбор → перечисли: "с 10:00 до 22:00 или с 16:00 до 04:00". Нет — ""
+
+requirements: ТОЛЬКО требования К КАНДИДАТУ из текста (возраст, пол, опыт, язык, проживание в районе, сан книжка, "не студенты", "с паспортом"). Все пункты в ОДНУ строку, разделённые ", ". Пример: "Возраст от 18 лет, С паспортом, Не студентам". Блок может называться "Требования", "Кого ищем", "От вас". Нет требований в тексте — ""
+
+conditions: ТОЛЬКО что ПРЕДЛАГАЕТ работодатель (питание, развоз, жильё/жатакана, оформление, выплаты 2 раза в месяц, бонусы). Все пункты в ОДНУ строку, разделённые ", ". Пример: "Питание, Развоз, Официальное оформление". Нет — ""
+
+description: суть — кого и куда ищут одной-двумя фразами + всё полезное что НЕ влезло в другие поля. Без эмодзи, без телефонов, без КАПСа. ОБЯЗАТЕЛЬНО указывай ЧТО конкретно нужно делать — даже если написано косвенно на кыргызском: "малина отогонго" → "Требуется человек для сбора малины в Новопокровке". Если суть только из контекста — всё равно напиши её. Если есть нюанс по зарплате (диапазон) — добавь сюда. Пустым оставляй ТОЛЬКО если вообще нет никакой информации о работе.
+
+experience_work: если опыт назван — коротко ("от 3 месяцев", "от 1 года"). Нет — ""
+
+remote_work: всегда false. true ТОЛЬКО если это явно нормальная офлайн-компания которая разрешает удалёнку. Онлайн-подработки = это спам, их сюда не пускают
+
+city: "Бишкек" по умолчанию. Другой город КР только если явно указан
+
+work_address: адрес/ориентир если есть (улица, рынок, ТЦ, микрорайон). Нет — ""
+
+region: "" по умолчанию. Менять только если явно назван регион
+
+ЗАРПЛАТА — определи период, он задаёт масштаб числа:
+- "в час"/"саатына" → число как есть. payment_period "В час". Пример: "400 сомдон" → 400
+- "в день"/"за смену"/"күнүнө"/"кунуно" → число как есть. "В день". Пример: "1500 сом в день" → 1500
+- "в месяц"/"оклад"/"айлык" → если число МЕНЬШЕ 1000, это тысячи, умножь: "35" → 35000, "30-35" → 30000, "35/40" → 35000. Если ≥1000 как есть: "45000" → 45000. payment_period "В месяц"
+- Диапазон ("от X до Y", "X-Y", "от X") → в salary_net нижнюю границу (X), в description полный диапазон словами
+- Зарплата не указана → salary_net 0, payment_period ""
+
+company_description: найди телефон или @username в ЛЮБОМ месте текста, верни ССЫЛКУ без эмодзи. Телефон приведи к 996XXXXXXXXX (12 цифр):
+- начинается с 0, 10 цифр → убери 0, добавь 996 (0707798195 → 996707798195)
+- начинается с +996 или 996 → только цифры
+- Несколько номеров → возьми первый
+Тип ссылки:
+- упомянут WhatsApp/Ватсап/вотсап/Ватсапп/WA/АP → https://wa.me/996XXXXXXXXX
+- упомянут Telegram/телеграм или дан @username → https://t.me/username (для @) или https://t.me/+996XXXXXXXXX
+- "только звонить"/"звоните"/"не писать" → tel:+996XXXXXXXXX
+- соцсеть не указана, просто номер → https://wa.me/996XXXXXXXXX (по умолчанию)
+
+Объявление:
+{clean_text}"""
+        }]
+    )
+
+    raw = strip_json_block(response.choices[0].message.content)
+    if not raw:
+        raise ValueError("GPT вернул пустой ответ")
+    return json.loads(raw)
+
+
+def parse_vacancy_safe(text: str) -> dict:
+    parsed = parse_vacancy(text)
+    if has_glitch(parsed):
+        print("⚠ В ответе GPT посторонние символы — повторный парсинг")
+        try:
+            retry = parse_vacancy(text)
+            return retry
+        except Exception as e:
+            print(f"⚠ Повторный парсинг не удался: {e}")
+    return parsed
+
+
+def guard_against_hallucination(original: str, vacancy: dict) -> dict:
+    text_lower = original.lower()
+
+    req_markers = [
+        "требовани", "талап", "кандидат", "от вас", "нужно уметь",
+        "обязанност", "кого ищем", "кого мы ищем", "опыт", "тажрыйба",
+        "возраст", "жаш", "лет", "от 1", "приветств", "паспорт", "не студент",
+        "не школьник", "коммуникабел", "ответствен"
+    ]
+    has_req = any(m in text_lower for m in req_markers)
+
+    cond_markers = [
+        "услови", "предлага", "шарт", "оформлени", "питани", "развоз",
+        "график", "зарплат", "оплат", "з/п", "айлык", "компенсац", "бонус",
+        "тамак", "жатакана", "жилье", "жильё", "обед", "ужин", "выплат", "ставка"
+    ]
+    has_cond = any(m in text_lower for m in cond_markers)
+
+    if not has_req:
+        vacancy["requirements"] = ""
+    if not has_cond:
+        vacancy["conditions"] = ""
+
+    return vacancy
+
+
+def postprocess_vacancy(original: str, vacancy: dict, contact: str) -> dict:
+    if not isinstance(vacancy, dict):
+        vacancy = {}
+
+    text_fields = [
+        "position", "category", "company", "work_schedule", "requirements",
+        "conditions", "description", "experience_work", "city", "work_address",
+        "region", "payment_period", "company_description"
+    ]
+    for field in text_fields:
+        val = str(vacancy.get(field, "") or "").strip()
+        if field != "company_description":
+            val = strip_foreign_chars(val)
+        vacancy[field] = val
+
+    vacancy["remote_work"] = bool(vacancy.get("remote_work", False))
+    vacancy["company_description"] = contact or extract_contact(original) or vacancy["company_description"]
+
+    for list_field in ("requirements", "conditions"):
+        val = vacancy.get(list_field, "") or ""
+        parts = [re.sub(r"^[\-–—•*]\s*", "", p).strip() for p in re.split(r"\n|(?<!\d)-(?!\d)", val)]
+        vacancy[list_field] = ", ".join(p for p in parts if p)
+
+
+    if not vacancy["position"]:
+        vacancy["position"] = "Сотрудник"
+    if not vacancy["company"]:
+        vacancy["company"] = "Частный работодатель"
+    if vacancy["category"] not in CATEGORIES:
+        vacancy["category"] = "other"
+
+    try:
+        salary_raw = str(vacancy.get("salary_net", 0)).replace(" ", "")
+        vacancy["salary_net"] = int(float(salary_raw))
+    except (ValueError, TypeError):
+        vacancy["salary_net"] = 0
+
+    if vacancy["salary_net"] <= 0:
+        vacancy["salary_net"] = 0
+        vacancy["payment_period"] = ""
+
+    return guard_against_hallucination(original, vacancy)
+
+
+def finalize(vacancy: dict) -> dict:
+    category = vacancy.get("category", "other")
+    if category not in CATEGORIES:
+        category = "other"
+
+    salary = vacancy.get("salary_net", 0)
+    try:
+        salary = int(salary)
+    except (ValueError, TypeError):
+        salary = 0
+
+    period = vacancy.get("payment_period", "") or ""
+    if salary == 0:
+        period = ""
+
+    return {
+        "user_id": 1,
+        "position": vacancy.get("position", "") or "",
+        "category": category,
+        "work_schedule": vacancy.get("work_schedule", "") or "",
+        "requirements": vacancy.get("requirements", "") or "",
+        "conditions": vacancy.get("conditions", "") or "",
+        "description": vacancy.get("description", "") or "",
+        "experience_work": vacancy.get("experience_work", "") or "",
+        "remote_work": bool(vacancy.get("remote_work", False)),
+        "city": vacancy.get("city", "") or "Бишкек",
+        "work_address": vacancy.get("work_address", "") or "",
+        "region": vacancy.get("region", "") or "",
+        "payment_period": period,
+        "salary_net": salary,
+        "company": vacancy.get("company", "") or "Частный работодатель",
+        "company_description": vacancy.get("company_description", "") or "",
+    }
