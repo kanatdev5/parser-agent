@@ -12,12 +12,15 @@ SESSION_STRING = os.getenv("SESSION_STRING", "")
 GROUPS = ["@Jumush_BishkekKg", "@bishkek_jumush"]
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID", "@Kanat_Umetov")
 
 BACKEND_URL = os.getenv("BACKEND_URL", "").rstrip("/")
 BACKEND_PHONE = os.getenv("BACKEND_PHONE", "")
+BACKEND_REFRESH_TOKEN = os.getenv("BACKEND_REFRESH_TOKEN", "")
+BACKEND_REFRESH_TOKEN_EXPIRES = os.getenv("BACKEND_REFRESH_TOKEN_EXPIRES", "")
 
 DEFAULT_USER_ID = 1
-SEEN_FILE = "seen_vacancies.json"
+SEEN_FILE = os.getenv("SEEN_FILE", "seen_vacancies.json")
 
 CATEGORIES = [
     "it", "trade", "sales", "construction", "transport", "food",
@@ -70,7 +73,7 @@ REJECT_PATTERNS = [
     r"\bиштейбиз\b|\bиштейбис\b",               # "мы работаем/готовы работать" — предлагают свой труд
     r"иш\s*болсо|жумуш\s*болсо",                # "если есть работа — пишите" — ищут работу сами
     r"жумуш айтып|иш айтып|жумуш тапса|иш тапса|жумуш таап",
-    r"\b(?:ищу работу|ищу подработку|жумуш издейм|жумуш керек|мага жумуш|мне нужна работа)\b",
+    r"\b(?:ищу работу|ищу подработку|ищем работу|ищем подработку|мы ищем работу|жумуш издейм|жумуш керек|мага жумуш|мне нужна работа)\b",
     r"\bиш керек\b",
     r"\b(?:иш|жумуш) изде",
     r"\d+\s*адам\s*кош",
@@ -91,7 +94,8 @@ REJECT_PATTERNS = [
     r"переписк\w*\s+(?:с\s+)?клиент",
     r"(?:онлайн|удал[её]н|из дома|уйдо отуруп|уйдо олтуруп).{0,40}(?:отвеч|сообщени|переписк)",
     r"\b(?:россия|рф|ростов|сочи|анапа|гелджик|гелendжик|казахстан|алмата|кз)\b",
-    r"\b(?:каспи|доверенность|вериф|верификац|открыть карту|загран)\b",
+    r"\bв[ао]л[ао]нт[её]?р",                  # волонтер/волонтёр/волантер — платное "волонтёрство" = скам
+    r"\b(?:каспи|доверенност|вериф|верификац|открыть карту|загран)\b",  # доверенност* ловит все падежи
     r"\b(?:бригада|биргада)\s*керек\b",
     r"керек болсо",
     r"\b(?:tether|крипт|вейп|elfbar|сатылат|продаю)\b",

@@ -3,12 +3,38 @@ import time
 
 import httpx
 
-from config import BACKEND_URL, BACKEND_PHONE, CATEGORIES, SCHEDULE_ENUM
+from config import BACKEND_URL, BACKEND_PHONE, BACKEND_REFRESH_TOKEN, CATEGORIES, SCHEDULE_ENUM
 from utils import jwt_exp
+from notify import notify_admin_error
 
 _ROTATION_RE = re.compile(r'\d+/\d+')
 
 _token_cache = {"token": None, "exp": 0}
+
+# Callback вызывается когда refresh_token истёк — бот просит код у админа
+_reauth_callback = None
+
+
+def set_reauth_callback(fn):
+    global _reauth_callback
+    _reauth_callback = fn
+
+
+def _save_refresh_token(token: str):
+    """Сохраняет refresh_token в .env без лишних кавычек."""
+    try:
+        with open(".env", "r", encoding="utf-8") as f:
+            content = f.read()
+        pattern = re.compile(r"^BACKEND_REFRESH_TOKEN=.*$", re.MULTILINE)
+        new_line = f"BACKEND_REFRESH_TOKEN={token}"
+        if pattern.search(content):
+            content = pattern.sub(new_line, content)
+        else:
+            content = content.rstrip("\n") + f"\n{new_line}\n"
+        with open(".env", "w", encoding="utf-8") as f:
+            f.write(content)
+    except Exception as e:
+        print(f"✗ Не удалось сохранить refresh_token: {e}")
 
 
 def to_backend_schedule(text: str) -> str:
@@ -79,29 +105,76 @@ def build_backend_payload(final: dict) -> dict:
     }
 
 
+async def reauth_via_code(code: str) -> str:
+    """Авторизуется по WhatsApp коду, сохраняет refresh_token, возвращает access_token."""
+    async with httpx.AsyncClient(timeout=15) as http:
+        r = await http.post(
+            f"{BACKEND_URL}/auth/confirm-phone",
+            json={"phoneNumber": BACKEND_PHONE, "code": code},
+        )
+        r.raise_for_status()
+        token = r.json().get("access_token", "")
+        refresh = r.cookies.get("refresh_token", "")
+        if refresh:
+            _save_refresh_token(refresh)
+            # Обновляем переменную окружения в текущем процессе
+            import os
+            os.environ["BACKEND_REFRESH_TOKEN"] = refresh
+        _token_cache["token"] = token
+        _token_cache["exp"] = jwt_exp(token) or (time.time() + 900)
+        print("🔑 Токен обновлён через WhatsApp код")
+        return token
+
+
 async def get_backend_token(http) -> str:
     now = time.time()
     if _token_cache["token"] and _token_cache["exp"] - 60 > now:
         return _token_cache["token"]
 
-    r1 = await http.post(f"{BACKEND_URL}/auth/login",
-                         json={"phoneNumber": BACKEND_PHONE})
-    r1.raise_for_status()
-    sms_code = r1.json().get("smsCode")
-    if not sms_code:
-        raise RuntimeError("Бэкенд не вернул smsCode — похоже это не dev-режим, логин нужно делать вручную")
+    import os
+    refresh = os.environ.get("BACKEND_REFRESH_TOKEN") or BACKEND_REFRESH_TOKEN
+    if not refresh:
+        raise RuntimeError("BACKEND_REFRESH_TOKEN не задан")
 
-    r2 = await http.post(f"{BACKEND_URL}/auth/confirm-phone",
-                         json={"phoneNumber": BACKEND_PHONE, "code": str(sms_code)})
-    r2.raise_for_status()
-    token = r2.json().get("access_token")
-    if not token:
-        raise RuntimeError("Бэкенд не вернул access_token")
+    r = await http.post(f"{BACKEND_URL}/auth/refresh", cookies={"refresh_token": refresh})
+
+    if r.status_code == 401:
+        print("✗ Refresh token истёк — запрашиваем код у админа")
+        if _reauth_callback:
+            token = await _reauth_callback()
+            if token:
+                return token
+        raise RuntimeError("Refresh token истёк. Отправьте WhatsApp код боту командой: reauth XXXX")
+
+    r.raise_for_status()
+    token = r.json().get("access_token")
+    new_refresh = r.cookies.get("refresh_token")
+    if new_refresh:
+        _save_refresh_token(new_refresh)
+        import os
+        os.environ["BACKEND_REFRESH_TOKEN"] = new_refresh
 
     _token_cache["token"] = token
-    _token_cache["exp"] = jwt_exp(token) or (now + 3600)
-    print("🔑 Залогинились в бэкенд")
+    _token_cache["exp"] = jwt_exp(token) or (now + 900)
+    print("🔑 Токен обновлён")
     return token
+
+
+async def delete_from_backend(vacancy_id: int) -> str:
+    async with httpx.AsyncClient(timeout=15) as http:
+        token = await get_backend_token(http)
+        r = await http.delete(
+            f"{BACKEND_URL}/vacancy/{vacancy_id}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        if r.status_code in (200, 204):
+            return f"✅ Вакансия #{vacancy_id} удалена с сайта"
+        elif r.status_code == 404:
+            return f"❌ Вакансия #{vacancy_id} не найдена"
+        elif r.status_code == 403:
+            return f"❌ Нет доступа к вакансии #{vacancy_id}"
+        else:
+            return f"❌ Ошибка {r.status_code} при удалении #{vacancy_id}"
 
 
 async def post_to_backend(final: dict):
@@ -134,6 +207,8 @@ async def post_to_backend(final: dict):
                 except Exception:
                     detail = r.text[:200]
                 print(f"✗ Бэкенд {r.status_code}: {detail}")
+                await notify_admin_error(f"Бэкенд вернул {r.status_code}:\n{detail}")
 
         except Exception as e:
             print(f"✗ Ошибка отправки на бэкенд: {e}")
+            await notify_admin_error(f"Ошибка отправки вакансии на бэкенд:\n{e}", exc=e)
