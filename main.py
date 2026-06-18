@@ -52,6 +52,7 @@ seen_hashes: set = load_seen()
 
 # Ожидание WhatsApp кода от админа при переавторизации
 _reauth_future: asyncio.Future | None = None
+_reauth_lock = asyncio.Lock()
 
 
 async def _send_admin(text: str):
@@ -64,26 +65,33 @@ async def _send_admin(text: str):
 
 async def _reauth_callback() -> str | None:
     global _reauth_future
-    await _send_admin(
-        "⚠️ Refresh token истёк!\n"
-        f"Код отправлен на WhatsApp {BACKEND_PHONE}.\n"
-        "Ответьте: reauth XXXX"
-    )
-    async with httpx.AsyncClient(timeout=10) as http:
-        await http.post(
-            f"{BACKEND_URL}/auth/login",
-            json={"phoneNumber": BACKEND_PHONE},
+    # Если reauth уже идёт — ждём тот же future вместо запуска нового
+    if _reauth_lock.locked() and _reauth_future and not _reauth_future.done():
+        try:
+            return await asyncio.wait_for(asyncio.shield(_reauth_future), timeout=300)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            return None
+    async with _reauth_lock:
+        await _send_admin(
+            "⚠️ Refresh token истёк!\n"
+            f"Код отправлен на WhatsApp {BACKEND_PHONE}.\n"
+            "Ответьте: reauth XXXX"
         )
-    loop = asyncio.get_event_loop()
-    _reauth_future = loop.create_future()
-    try:
-        token = await asyncio.wait_for(_reauth_future, timeout=300)
-        return token
-    except asyncio.TimeoutError:
-        await _send_admin("❌ Код не получен в течение 5 минут. Переавторизация отменена.")
-        return None
-    finally:
-        _reauth_future = None
+        async with httpx.AsyncClient(timeout=10) as http:
+            await http.post(
+                f"{BACKEND_URL}/auth/login",
+                json={"phoneNumber": BACKEND_PHONE},
+            )
+        loop = asyncio.get_event_loop()
+        _reauth_future = loop.create_future()
+        try:
+            token = await asyncio.wait_for(_reauth_future, timeout=300)
+            return token
+        except asyncio.TimeoutError:
+            await _send_admin("❌ Код не получен в течение 5 минут. Переавторизация отменена.")
+            return None
+        finally:
+            _reauth_future = None
 
 
 set_reauth_callback(_reauth_callback)

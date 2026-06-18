@@ -116,10 +116,10 @@ async def reauth_via_code(code: str) -> str:
         token = r.json().get("access_token", "")
         refresh = r.cookies.get("refresh_token", "")
         if refresh:
-            _save_refresh_token(refresh)
-            # Обновляем переменную окружения в текущем процессе
             import os
             os.environ["BACKEND_REFRESH_TOKEN"] = refresh
+            print(f"🔑 Новый BACKEND_REFRESH_TOKEN: {refresh}")
+            print("⚠ Обновите BACKEND_REFRESH_TOKEN в Railway Variables вручную!")
         _token_cache["token"] = token
         _token_cache["exp"] = jwt_exp(token) or (time.time() + 900)
         print("🔑 Токен обновлён через WhatsApp код")
