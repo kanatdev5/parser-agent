@@ -34,7 +34,7 @@ def _save_refresh_token(token: str):
         with open(".env", "w", encoding="utf-8") as f:
             f.write(content)
     except Exception as e:
-        print(f"✗ Не удалось сохранить refresh_token: {e}")
+        print(f"[ERR] Не удалось сохранить refresh_token: {e}")
 
 
 def to_backend_schedule(text: str) -> str:
@@ -118,11 +118,11 @@ async def reauth_via_code(code: str) -> str:
         if refresh:
             import os
             os.environ["BACKEND_REFRESH_TOKEN"] = refresh
-            print(f"🔑 Новый BACKEND_REFRESH_TOKEN: {refresh}")
-            print("⚠ Обновите BACKEND_REFRESH_TOKEN в Railway Variables вручную!")
+            print(f"[OK] Новый BACKEND_REFRESH_TOKEN: {refresh}")
+            print("[!] Обновите BACKEND_REFRESH_TOKEN в Railway Variables вручную!")
         _token_cache["token"] = token
         _token_cache["exp"] = jwt_exp(token) or (time.time() + 900)
-        print("🔑 Токен обновлён через WhatsApp код")
+        print("[OK] Токен обновлён")
         return token
 
 
@@ -139,7 +139,7 @@ async def get_backend_token(http) -> str:
     r = await http.post(f"{BACKEND_URL}/auth/refresh", cookies={"refresh_token": refresh})
 
     if r.status_code == 401:
-        print("✗ Refresh token истёк — запрашиваем код у админа")
+        print("[ERR] Refresh token истёк — запрашиваем код у админа")
         if _reauth_callback:
             token = await _reauth_callback()
             if token:
@@ -156,7 +156,7 @@ async def get_backend_token(http) -> str:
 
     _token_cache["token"] = token
     _token_cache["exp"] = jwt_exp(token) or (now + 900)
-    print("🔑 Токен обновлён")
+    print("[KEY] Токен обновлён")
     return token
 
 
@@ -168,18 +168,18 @@ async def delete_from_backend(vacancy_id: int) -> str:
             headers={"Authorization": f"Bearer {token}"},
         )
         if r.status_code in (200, 204):
-            return f"✅ Вакансия #{vacancy_id} удалена с сайта"
+            return f"[OK] Вакансия #{vacancy_id} удалена с сайта"
         elif r.status_code == 404:
-            return f"❌ Вакансия #{vacancy_id} не найдена"
+            return f"[ERR] Вакансия #{vacancy_id} не найдена"
         elif r.status_code == 403:
-            return f"❌ Нет доступа к вакансии #{vacancy_id}"
+            return f"[ERR] Нет доступа к вакансии #{vacancy_id}"
         else:
-            return f"❌ Ошибка {r.status_code} при удалении #{vacancy_id}"
+            return f"[ERR] Ошибка {r.status_code} при удалении #{vacancy_id}"
 
 
 async def post_to_backend(final: dict):
     if not BACKEND_URL or not BACKEND_PHONE:
-        print("ℹ Бэкенд не настроен (BACKEND_URL/BACKEND_PHONE) — на сайт не отправляем")
+        print("[INFO] Бэкенд не настроен (BACKEND_URL/BACKEND_PHONE) — на сайт не отправляем")
         return
 
     payload = build_backend_payload(final)
@@ -200,15 +200,15 @@ async def post_to_backend(final: dict):
 
             if r.status_code in (200, 201):
                 note = " (зарплата договорная)" if payload["salary_net"] == 0 else ""
-                print(f"🌐 Отправлено на сайт!{note}")
+                print(f"[OK] Отправлено на сайт!{note}")
             else:
                 try:
                     detail = r.json().get("message", "")
                 except Exception:
                     detail = r.text[:200]
-                print(f"✗ Бэкенд {r.status_code}: {detail}")
+                print(f"[ERR] Бэкенд {r.status_code}: {detail}")
                 await notify_admin_error(f"Бэкенд вернул {r.status_code}:\n{detail}")
 
         except Exception as e:
-            print(f"✗ Ошибка отправки на бэкенд: {e}")
+            print(f"[ERR] Ошибка отправки на бэкенд: {e}")
             await notify_admin_error(f"Ошибка отправки вакансии на бэкенд:\n{e}", exc=e)

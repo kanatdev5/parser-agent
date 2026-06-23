@@ -1,5 +1,9 @@
+import sys
 import asyncio
 from datetime import datetime
+
+sys.stdout.reconfigure(encoding="utf-8")
+sys.stderr.reconfigure(encoding="utf-8")
 
 import httpx
 from telethon import TelegramClient, events
@@ -32,15 +36,15 @@ async def _notify_token_expiry():
                     json={
                         "chat_id": CHAT_ID,
                         "text": (
-                            f"⚠️ BACKEND_REFRESH_TOKEN истекает через {days_left} дн!\n"
+                            f"[!] BACKEND_REFRESH_TOKEN истекает через {days_left} дн!\n"
                             "Запустите get_backend_auth.py локально и обновите "
                             "BACKEND_REFRESH_TOKEN + BACKEND_REFRESH_TOKEN_EXPIRES на Railway."
                         ),
                     },
                 )
-            print(f"⚠ Напоминание об истечении токена отправлено ({days_left} дн)")
+            print(f"[!] Напоминание об истечении токена отправлено ({days_left} дн)")
     except Exception as e:
-        print(f"✗ Ошибка проверки токена: {e}")
+        print(f"[ERR] Ошибка проверки токена: {e}")
 
 
 async def token_expiry_loop():
@@ -65,30 +69,37 @@ async def _send_admin(text: str):
 
 async def _reauth_callback() -> str | None:
     global _reauth_future
-    # Если reauth уже идёт — ждём тот же future вместо запуска нового
     if _reauth_lock.locked() and _reauth_future and not _reauth_future.done():
         try:
             return await asyncio.wait_for(asyncio.shield(_reauth_future), timeout=300)
         except (asyncio.TimeoutError, asyncio.CancelledError):
             return None
     async with _reauth_lock:
-        await _send_admin(
-            "⚠️ Refresh token истёк!\n"
-            f"Код отправлен на WhatsApp {BACKEND_PHONE}.\n"
-            "Ответьте: reauth XXXX"
-        )
-        async with httpx.AsyncClient(timeout=10) as http:
-            await http.post(
-                f"{BACKEND_URL}/auth/login",
-                json={"phoneNumber": BACKEND_PHONE},
-            )
         loop = asyncio.get_event_loop()
         _reauth_future = loop.create_future()
         try:
-            token = await asyncio.wait_for(_reauth_future, timeout=300)
-            return token
+            async with httpx.AsyncClient(timeout=10) as http:
+                r = await http.post(
+                    f"{BACKEND_URL}/auth/login",
+                    json={"phoneNumber": BACKEND_PHONE},
+                )
+            sms_code = r.json().get("smsCode") if r.is_success else None
+            if sms_code:
+                print(f"[OK] smsCode получен из ответа сервера: {sms_code}")
+                token = await reauth_via_code(str(sms_code))
+                if not _reauth_future.done():
+                    _reauth_future.set_result(token)
+                return token
+            else:
+                await _send_admin(
+                    "[!] Refresh token истёк!\n"
+                    f"Код отправлен на WhatsApp {BACKEND_PHONE}.\n"
+                    "Ответьте: reauth XXXX"
+                )
+                token = await asyncio.wait_for(_reauth_future, timeout=300)
+                return token
         except asyncio.TimeoutError:
-            await _send_admin("❌ Код не получен в течение 5 минут. Переавторизация отменена.")
+            await _send_admin("[ERR] Код не получен в течение 5 минут. Переавторизация отменена.")
             return None
         finally:
             _reauth_future = None
@@ -109,9 +120,9 @@ async def handle_admin_command(event):
             token = await reauth_via_code(code)
             if _reauth_future and not _reauth_future.done():
                 _reauth_future.set_result(token)
-            await event.reply("✅ Переавторизация успешна!")
+            await event.reply("[OK] Переавторизация успешна!")
         except Exception as e:
-            await event.reply(f"❌ Ошибка: {e}")
+            await event.reply(f"[ERR] Ошибка: {e}")
         return
 
     # delete 42 55 78 — удалить вакансии
@@ -119,7 +130,7 @@ async def handle_admin_command(event):
         parts = text.split()[1:]
         ids = [int(p) for p in parts if p.isdigit()]
         if not ids:
-            await event.reply("❌ Укажите ID: delete 42")
+            await event.reply("[ERR] Укажите ID: delete 42")
             return
         results = []
         for vid in ids:
@@ -127,7 +138,7 @@ async def handle_admin_command(event):
                 res = await delete_from_backend(vid)
                 results.append(res)
             except Exception as e:
-                results.append(f"❌ #{vid}: {e}")
+                results.append(f"[ERR] #{vid}: {e}")
         await event.reply("\n".join(results))
         return
 
@@ -150,66 +161,66 @@ async def handle_new_message(event):
     clean = strip_tg_mentions(text)
     contact = extract_contact(clean)
 
-    print(f"\n📨 Сообщение: {clean[:50]}...")
+    print(f"\n[MSG] {clean[:50]}...")
 
     if not is_job_offer(clean):
-        print("🗑 Спам / услуги / зарубеж / поиск работы / реклама группы — пропускаем")
+        print("[SKIP] Спам / услуги / зарубеж / поиск работы / реклама группы")
         return
 
     if not has_enough_data(clean):
-        print("⚠ Непонятно кого ищут или нет контакта — пропускаем")
+        print("[SKIP] Непонятно кого ищут или нет контакта")
         return
 
-    print("✓ Вакансия — парсим...")
+    print("[OK] Вакансия — парсим...")
 
     try:
         parsed = parse_vacancy_safe(clean)
 
         if not as_bool(parsed.get("is_real_job"), default=True):
-            print("🗑 Непонятная работа / не предложение работы (GPT) — пропускаем")
+            print("[SKIP] Не предложение работы (GPT)")
             return
 
         if not as_bool(parsed.get("has_enough_info"), default=True):
-            print("🗑 Мало информации о вакансии (только должность + номер) — пропускаем")
+            print("[SKIP] Мало информации о вакансии")
             return
 
         parsed = postprocess_vacancy(clean, parsed, contact)
         final = finalize(parsed)
 
         if not final["position"]:
-            print("🗑 Не удалось определить должность — пропускаем")
+            print("[SKIP] Не удалось определить должность")
             return
 
         VAGUE_POSITIONS = {"сотрудник", "работник", "разнорабочий", "помощник"}
         if final["position"].lower() in VAGUE_POSITIONS:
-            print(f"🗑 Размытая должность без конкретики ({final['position']}) — пропускаем")
+            print(f"[SKIP] Размытая должность без конкретики ({final['position']})")
             return
 
         if not final["company_description"]:
             final["company_description"] = contact
 
         if not final["company_description"]:
-            print("⚠ Нет контакта — пропускаем")
+            print("[SKIP] Нет контакта")
             return
 
         vacancy_hash = make_hash(clean)
 
         if vacancy_hash in seen_hashes:
-            print(f"🔁 Дубль — {final['position']}")
+            print(f"[DUP] Дубль — {final['position']}")
             return
 
         seen_hashes.add(vacancy_hash)
         save_seen(seen_hashes)
 
-        print(f"📋 {final['position']} [{final['category']}]")
+        print(f"[POST] {final['position']} [{final['category']}]")
 
         await send_to_telegram(text, final)
-        print("📤 Отправлено в ТГ!")
+        print("[OK] Отправлено в ТГ!")
 
         await post_to_backend(final)
 
     except Exception as e:
-        print(f"✗ Ошибка: {e}")
+        print(f"[ERR] Ошибка: {e}")
         await notify_admin_error(f"Ошибка обработки вакансии:\n{e}", exc=e)
 
 
@@ -233,16 +244,16 @@ async def _handle_bot_message(text: str, chat_id, message_id: int):
             token = await reauth_via_code(code)
             if _reauth_future and not _reauth_future.done():
                 _reauth_future.set_result(token)
-            await _reply_bot(chat_id, "✅ Переавторизация успешна!", message_id)
+            await _reply_bot(chat_id, "[OK] Переавторизация успешна!", message_id)
         except Exception as e:
-            await _reply_bot(chat_id, f"❌ Ошибка: {e}", message_id)
+            await _reply_bot(chat_id, f"[ERR] Ошибка: {e}", message_id)
         return
 
     if text.lower().startswith("delete "):
         parts = text.split()[1:]
         ids = [int(p) for p in parts if p.isdigit()]
         if not ids:
-            await _reply_bot(chat_id, "❌ Укажите ID: delete 42", message_id)
+            await _reply_bot(chat_id, "[ERR] Укажите ID: delete 42", message_id)
             return
         results = []
         for vid in ids:
@@ -250,7 +261,7 @@ async def _handle_bot_message(text: str, chat_id, message_id: int):
                 res = await delete_from_backend(vid)
                 results.append(res)
             except Exception as e:
-                results.append(f"❌ #{vid}: {e}")
+                results.append(f"[ERR] #{vid}: {e}")
         await _reply_bot(chat_id, "\n".join(results), message_id)
         return
 
@@ -267,10 +278,10 @@ async def _handle_bot_message(text: str, chat_id, message_id: int):
 
 async def bot_polling_loop():
     if not BOT_TOKEN or not CHAT_ID:
-        print("⚠ BOT_TOKEN или CHAT_ID не заданы — bot polling отключён")
+        print("[!] BOT_TOKEN или CHAT_ID не заданы — bot polling отключён")
         return
     offset = 0
-    print("🤖 Bot polling запущен")
+    print("[OK] Bot polling запущен")
     while True:
         try:
             async with httpx.AsyncClient(timeout=30) as http:
@@ -296,7 +307,7 @@ async def bot_polling_loop():
         except asyncio.CancelledError:
             return
         except Exception as e:
-            print(f"✗ bot polling: {e}")
+            print(f"[ERR] bot polling: {e}")
             await asyncio.sleep(5)
 
 
@@ -305,7 +316,7 @@ async def main():
         await client.start()
     else:
         await client.start(phone=PHONE)
-    print("✓ Подключено")
+    print("[OK] Подключено")
     print(f"Слушаем: {', '.join(GROUPS)}")
     await _notify_token_expiry()
     asyncio.create_task(token_expiry_loop())

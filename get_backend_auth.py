@@ -29,9 +29,15 @@ async def main():
             print(f"✗ Ошибка {r1.status_code}: {r1.text[:1000]}")
             return
         r1.raise_for_status()
-        print("✓ Код отправлен на WhatsApp")
 
-        code = input("Введите код из WhatsApp: ").strip()
+        login_data = r1.json()
+        sms_code = login_data.get("smsCode")
+        if sms_code:
+            print(f"✓ Код получен из ответа сервера: {sms_code}")
+            code = str(sms_code).strip()
+        else:
+            print("✓ Код отправлен на WhatsApp")
+            code = input("Введите код из WhatsApp: ").strip()
 
         r2 = await http.post(f"{BACKEND_URL}/auth/confirm-phone",
                              json={"phoneNumber": BACKEND_PHONE, "code": code})
