@@ -53,6 +53,7 @@ async def token_expiry_loop():
         await _notify_token_expiry()
 
 seen_hashes: set = load_seen()
+_group_ids: set[int] = set()
 
 # Ожидание WhatsApp кода от админа при переавторизации
 _reauth_future: asyncio.Future | None = None
@@ -152,9 +153,11 @@ async def handle_admin_command(event):
         )
 
 
-@client.on(events.NewMessage(chats=GROUPS))
+@client.on(events.NewMessage(incoming=True))
 async def handle_new_message(event):
-    text = event.message.text
+    if _group_ids and event.chat_id not in _group_ids:
+        return
+    text = event.message.text or event.message.message
     if not text:
         return
 
@@ -312,12 +315,22 @@ async def bot_polling_loop():
 
 
 async def main():
+    global _group_ids
     if SESSION_STRING:
         await client.start()
     else:
         await client.start(phone=PHONE)
     print("[OK] Подключено")
-    print(f"Слушаем: {', '.join(GROUPS)}")
+
+    for g in GROUPS:
+        try:
+            entity = await client.get_entity(g)
+            _group_ids.add(entity.id)
+            print(f"[OK] Группа резолвирована: {g} -> {entity.id}")
+        except Exception as e:
+            print(f"[WARN] Не удалось резолвить группу {g}: {e}")
+
+    print(f"Слушаем группы: {', '.join(GROUPS)}")
     await _notify_token_expiry()
     asyncio.create_task(token_expiry_loop())
     asyncio.create_task(bot_polling_loop())
