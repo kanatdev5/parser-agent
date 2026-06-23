@@ -125,7 +125,7 @@ async def handle_admin_command(event):
             await event.reply(f"[ERR] Ошибка: {e}")
         return
 
-    # delete 42 55 78 — удалить вакансии
+    # delete 42 55 78     3— удалить вакансии
     if text.lower().startswith("delete "):
         parts = text.split()[1:]
         ids = [int(p) for p in parts if p.isdigit()]
